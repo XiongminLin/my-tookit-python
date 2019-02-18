@@ -2,29 +2,32 @@
 # -*- coding: utf-8 -*-
 """
 ato_analyzer.py: read file and store each line into an array 
-
 example: 
-$ python --version
-Python 3.6.5 :: Anaconda, Inc.
-$ python ato_analyzer.py
-----> Method 1: Tracking login velocity, threshold 10 m/s
-True  Positive: 171, False Negative: 151
-False Positive: 8, True Negative: 48
+$ python ato_analyzer.py 
+----> Method 1: Tracking login velocity, threshold 2000 m/s
+True Positive: 157, False Negative: 142
+False Positive: 2, True Negative: 77
+
 ----> Method 2: Tracking number of consecutive login failures, threshold 3
-True  Positive: 280, False Negative: 42
-False Positive: 0, True Negative: 56
+True Positive: 270, False Negative: 29
+False Positive: 18, True Negative: 61
+
 ----> Method 2: Tracking number of consecutive login failures, threshold 4
-True  Positive: 280, False Negative: 42
-False Positive: 0, True Negative: 56
+True Positive: 259, False Negative: 40
+False Positive: 18, True Negative: 61
+
 ----> Method 2: Tracking number of consecutive login failures, threshold 5
-True  Positive: 280, False Negative: 42
-False Positive: 0, True Negative: 56
+True Positive: 250, False Negative: 49
+False Positive: 18, True Negative: 61
+
 ----> Method 3: IP blacklisting
-True  Positive: 299, False Negative: 23
-False Positive: 12, True Negative: 44
+True Positive: 172, False Negative: 127
+False Positive: 0, True Negative: 79
+
 ----> M4: Combine and apply all 3 methods at the same time
-True  Positive: 317, False Negative: 5
-False Positive: 20, True Negative: 36
+True Positive: 292, False Negative: 7
+False Positive: 20, True Negative: 59
+
 """
 #
 # modification history:
@@ -38,6 +41,7 @@ import time
 
 # seperate each item with TAB
 TRAINING_FILE_PATH = "syslog.txt"
+ONLIE_BLACK_LIST_FILE_PATH = "online_blacklist.csv"
 
 # the item position in each entry
 # - starts from 0
@@ -50,11 +54,7 @@ P_LO = 27  # longitude
 P_LA = 28  # latitude
 
 # Velocity threshold in "meter per second"
-VELOCITY_THRESHOLD = 10
-
-# Consecutive login failures
-FAILURES_THRESHOLD = 3
-
+VELOCITY_THRESHOLD = 2000
 
 def main():
 	entries = readLog(TRAINING_FILE_PATH)
@@ -76,13 +76,13 @@ def runMethod1(entries):
 # M2: Tracking number of consecutive login failures compared against threshold
 def runMethod2(entries):
 	base = getBaseResult(entries)
-	FAILURES_THRESHOLD = 3
+	threshold = 3
 	for i in range(3):
 
-		print("----> Method 2: Tracking number of consecutive login failures, threshold {}".format(FAILURES_THRESHOLD))
-		result = method2TrackFailure(entries)
+		print("----> Method 2: Tracking number of consecutive login failures, threshold {}".format(threshold))
+		result = method2TrackFailure(entries, threshold)
 		printConfusionMatrix(base, result)
-		FAILURES_THRESHOLD += 1
+		threshold += 1
 
 
 # M3 IP blacklisting
@@ -99,7 +99,7 @@ def runMethod4(entries):
 	print("----> M4: Combine and apply all 3 methods at the same time")
 
 	result_1 = method1TrackVel(entries)
-	result_2 = method2TrackFailure(entries)
+	result_2 = method2TrackFailure(entries, 3)
 	result_3 = method3IPBlock(entries)
 
 	result = []
@@ -110,62 +110,57 @@ def runMethod4(entries):
 	printConfusionMatrix(base, result)
 
 
-def getBaseResult(entries):
-	result = []
-	for entry in entries:
-		if (entry[P_RT] == "SUCCESS") or (entry[P_RT] == "ALLOW"):
-			result.append(False)
-		else:
-			result.append(True)
-
-	return result
-
 # M1: Tracking login velocity
 def method1TrackVel(entries):
 	predict = [] # true: attack, false: not an attack
-	lastLoginDic = {}
+
 	for index in range(len(entries)):
 		entry = entries[index]
 
 		if index == 0:
 			predict.append(False)
 		
-		else:
+		else:  
 			predict.append(isVelTooLarge(entries[index-1], entry))
 
 	return predict
 
 
 # M2: Tracking number of consecutive login failures compared against threshold
-def method2TrackFailure(entries):
+def method2TrackFailure(entries, threshold):
 	predict = [] # true: attack, false: not an attack
 	failuresSoFar = 0
+
 	for index in range(len(entries)):
 		entry = entries[index]
 		result = entry[P_RT]
+		#print(failuresSoFar)
 
-		# legal attempt list
+		# legal attempt
 		if result != "FAILURE":
 			failuresSoFar = 0
 			predict.append(False)
 		
 		else:
 			failuresSoFar += 1
-			predict.append(isTooManyFailures(failuresSoFar))
+			if failuresSoFar >= threshold:
+				predict.append(True)
+			else:
+				predict.append(False)
 
 	return predict
 
 
 # M3 IP blacklisting
 def method3IPBlock(entries):
-	# legal IP list
-	WhiteIPs = getWhiteIPs(entries)
+	onlineBLs = readLog(ONLIE_BLACK_LIST_FILE_PATH)
+	blackIPs = getBlackIPs(onlineBLs)
 	predict = [] # true: attack, false: not an attack
 	for index in range(len(entries)):
 		entry = entries[index]
 		IP = entry[P_IP]
 		
-		if isIPInBlackList(IP, WhiteIPs):
+		if IP in blackIPs:
 			predict.append(True)
 		else:
 			predict.append(False)
@@ -173,16 +168,35 @@ def method3IPBlock(entries):
 	return predict
 
 
+def getBaseResult(entries):
+	whiteIPs = getwhiteIPs(entries)
+	result = []
+	for entry in entries:
+		if isLegalAttempt(entry, whiteIPs):
+			result.append(False)
+		else:
+			result.append(True)
+
+	return result
+
 def isVelTooLarge(entry1, entry2):
 	v = getLoginVelocity(entry1, entry2)
 	#print(v)
 	return v > VELOCITY_THRESHOLD
 
-def isTooManyFailures(failuresSoFar):
-	return failuresSoFar >= FAILURES_THRESHOLD
+# get black ip list through online black ip file
+def getBlackIPs(onlineBLs):
+	blackIPs = []
 
-def isIPInBlackList(IP, WhiteIPs):
-	return not IP in WhiteIPs
+	for data in onlineBLs:
+		if data[1] == "yes":
+			blackIPs.append(data[0])
+
+	return blackIPs
+
+
+def isIPInBlackList(IP):
+	return False
 
 # read item list from file
 # - notice: one item, one line
@@ -205,7 +219,7 @@ def readLog(fileName):
     return itemList
 
 # get white ip list
-def getWhiteIPs(entries):
+def getwhiteIPs(entries):
 	IPs = set()
 	for entry in entries:
 		if ((entry[P_RT] == "SUCCESS") or (entry[P_RT] == "ALLOW")) and entry[P_IP] != "":
@@ -216,11 +230,11 @@ def getWhiteIPs(entries):
 
 # check if entry is legal or not
 # - SUCCESS or ALLOW or IP in white list
-def isLegalAttempt(entry):
+def isLegalAttempt(entry, whiteIPs):
 	IP = entry[P_IP]
 	result = entry[P_RT]
 
-	return (result == "SUCCESS") or (result == "ALLOW") or (IP in WhiteIPs)
+	return (result == "SUCCESS") or (result == "ALLOW") or (IP in whiteIPs)
 
 
 # the login velocity (distance between 2 consecutive logins divided by time difference) 
@@ -299,7 +313,7 @@ def printConfusionMatrix(base, predict):
 			TN = TN + 1
 
 	print("True Positive: {}, False Negative: {}".format(TP, FN))
-	print("False Positive: {}, True Negative: {}".format(FP, TN))
+	print("False Positive: {}, True Negative: {}\n".format(FP, TN))
 
 if __name__ == "__main__":
     main()
